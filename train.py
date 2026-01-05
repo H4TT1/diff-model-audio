@@ -105,6 +105,10 @@ class MusicDiffusionTrainer:
         # Modèle
         self.model = model.to(self.device)
         
+        # Assure-toi que le noise scheduler est aussi sur le bon device
+        if hasattr(self.model, 'noise_scheduler'):
+            self.model.noise_scheduler.to(self.device)
+        
         # Data loaders
         self.train_dataloader = train_dataloader
         self.val_dataloader = val_dataloader

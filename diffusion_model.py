@@ -4,19 +4,21 @@ import torch.nn.functional as F
 import numpy as np
 from tqdm import tqdm
 from unet import MelSpectrogramUNet
+from simple_unet import SimpleMelUNet
 
 class NoiseScheduler:
     """Scheduleur de bruit pour le processus de diffusion"""
-    def __init__(self, timesteps=1000, beta_start=1e-4, beta_end=2e-2, schedule_type="linear"):
+    def __init__(self, timesteps=1000, beta_start=1e-4, beta_end=2e-2, schedule_type="linear", device="cpu"):
         self.timesteps = timesteps
+        self.device = device
         
         if schedule_type == "linear":
-            self.betas = torch.linspace(beta_start, beta_end, timesteps)
+            self.betas = torch.linspace(beta_start, beta_end, timesteps, device=device)
         elif schedule_type == "cosine":
             # Scheduleur cosinus pour une meilleure qualité
             s = 0.008
             steps = timesteps + 1
-            x = torch.linspace(0, timesteps, steps)
+            x = torch.linspace(0, timesteps, steps, device=device)
             alphas_cumprod = torch.cos(((x / timesteps) + s) / (1 + s) * torch.pi * 0.5) ** 2
             alphas_cumprod = alphas_cumprod / alphas_cumprod[0]
             betas = 1 - (alphas_cumprod[1:] / alphas_cumprod[:-1])
@@ -34,6 +36,19 @@ class NoiseScheduler:
         # Pour le reverse process
         self.sqrt_recip_alphas = torch.sqrt(1.0 / self.alphas)
         self.posterior_variance = self.betas * (1.0 - self.alphas_cumprod_prev) / (1.0 - self.alphas_cumprod)
+    
+    def to(self, device):
+        """Déplace tous les tensors sur le device spécifié"""
+        self.device = device
+        self.betas = self.betas.to(device)
+        self.alphas = self.alphas.to(device)
+        self.alphas_cumprod = self.alphas_cumprod.to(device)
+        self.alphas_cumprod_prev = self.alphas_cumprod_prev.to(device)
+        self.sqrt_alphas_cumprod = self.sqrt_alphas_cumprod.to(device)
+        self.sqrt_one_minus_alphas_cumprod = self.sqrt_one_minus_alphas_cumprod.to(device)
+        self.sqrt_recip_alphas = self.sqrt_recip_alphas.to(device)
+        self.posterior_variance = self.posterior_variance.to(device)
+        return self
 
     def add_noise(self, x_start, t, noise=None):
         """Ajoute du bruit gaussien selon le timestep t (forward process)"""
@@ -60,10 +75,11 @@ class MusicDiffusionModel(nn.Module):
                  schedule_type="cosine"):
         super().__init__()
         
-        self.unet = MelSpectrogramUNet(
+        self.unet = SimpleMelUNet(
             input_channels=input_channels,
             output_channels=input_channels,
-            base_channels=base_channels
+            base_channels=base_channels,
+            time_emb_dim=256
         )
         
         self.noise_scheduler = NoiseScheduler(
@@ -72,6 +88,12 @@ class MusicDiffusionModel(nn.Module):
         )
         
         self.timesteps = timesteps
+    
+    def to(self, device):
+        """Déplace le modèle et le noise scheduler sur le device spécifié"""
+        super().to(device)
+        self.noise_scheduler.to(device)
+        return self
         
     def forward(self, x, noise=None):
         """
@@ -201,17 +223,31 @@ class MusicDiffusionModel(nn.Module):
 
 def test_diffusion_model():
     """Test du modèle de diffusion"""
+    # Utilise CPU si GPU n'a pas assez de mémoire
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     
-    model = MusicDiffusionModel(
-        input_channels=1,
-        base_channels=64,
-        timesteps=1000,
-        schedule_type="cosine"
-    ).to(device)
+    try:
+        model = MusicDiffusionModel(
+            input_channels=1,
+            base_channels=32,  # Réduit pour moins de mémoire GPU
+            timesteps=1000,
+            schedule_type="cosine"
+        ).to(device)
+    except RuntimeError as e:
+        if "CUDA out of memory" in str(e):
+            print("⚠️  Mémoire GPU insuffisante, passage au CPU")
+            device = torch.device('cpu')
+            model = MusicDiffusionModel(
+                input_channels=1,
+                base_channels=32,
+                timesteps=1000,
+                schedule_type="cosine"
+            ).to(device)
+        else:
+            raise e
     
     # Test forward pass avec les dimensions du preprocessing
-    batch_size = 2
+    batch_size = 1  # Réduit pour économiser la mémoire
     x = torch.randn(batch_size, 1, 128, 216).to(device)  # Format du preprocessing
     
     loss = model.compute_loss(x)
@@ -219,7 +255,7 @@ def test_diffusion_model():
     
     # Test sampling avec les bonnes dimensions
     with torch.no_grad():
-        samples = model.sample(shape=(1, 1, 128, 216), device=device, num_inference_steps=20)
+        samples = model.sample(shape=(1, 1, 128, 216), device=device, num_inference_steps=5)  # Moins de steps
         print(f"Generated sample shape: {samples.shape}")
     
     print(f"Total parameters: {sum(p.numel() for p in model.parameters() if p.requires_grad):,}")
